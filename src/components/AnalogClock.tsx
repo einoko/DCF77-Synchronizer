@@ -84,12 +84,16 @@ const Hand: React.FC<HandProps> = ({ handComponent, rotation }) => {
     setPrevRotation(rotation);
   }, [rotation, prevRotation, accumulatedRotation]);
 
+  const isSafari: boolean = /^((?!chrome|android).)*safari/i.test(
+    navigator.userAgent
+  );
+
   const springProps = useSpring({
     rotation: rotation + accumulatedRotation,
     config: {
-      mass: 0.2,
-      tension: 2000,
-      friction: 15,
+      mass: isSafari ? 0 : 0.2,
+      tension: isSafari ? 40_000 : 2_000,
+      friction: isSafari ? 100 : 15,
     },
   });
 
