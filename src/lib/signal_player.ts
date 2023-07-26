@@ -1,38 +1,39 @@
-// Create DCF77Player class
-
 import { DCF77Minute } from "./dcf77";
 import { addMinutes, getDETime } from "./helpers";
 
 class DCF77Player {
-  audioCtx: AudioContext;
-  frequency = 77_500 / 5;
-  currentMinute = new Float32Array();
-  nextMinute = new Float32Array();
-  ZERO: number[] = [];
-  ONE: number[] = [];
-  END: number[] = [];
+  private audioCtx: AudioContext;
+  private frequency = 77_500 / 5;
+  private blockLengthMinutes = 10;
+  private currentBlock = new Float32Array();
+  private nextBlock = new Float32Array();
+  private ZERO: number[] = [];
+  private ONE: number[] = [];
+  private END: number[] = [];
 
-  private createMinute(n: number): Float32Array {
-    const DETime: Date = addMinutes(getDETime(), n);
-    const sequence: string = DCF77Minute(DETime);
-    const minute: Float32Array = new Float32Array(
-      this.audioCtx.sampleRate * 60
+  private createBlock(n: number): Float32Array {
+    const block: Float32Array = new Float32Array(
+      this.audioCtx.sampleRate * 60 * this.blockLengthMinutes
     );
+    for (let j = 0; j < this.blockLengthMinutes; j++) {
+      const DETime: Date = addMinutes(getDETime(), n + j);
+      const sequence: string = DCF77Minute(DETime);
 
-    sequence.split("").forEach((bit: string, i: number) => {
-      switch (bit) {
-        case "0":
-          minute.set(this.ZERO, this.audioCtx.sampleRate * i);
-          break;
-        case "1":
-          minute.set(this.ONE, this.audioCtx.sampleRate * i);
-          break;
-        case "!":
-          minute.set(this.END, this.audioCtx.sampleRate * i);
-      }
-    });
-
-    return minute;
+      sequence.split("").forEach((bit: string, i: number) => {
+        const offset = j * this.audioCtx.sampleRate * 60;
+        switch (bit) {
+          case "0":
+            block.set(this.ZERO, offset + this.audioCtx.sampleRate * i);
+            break;
+          case "1":
+            block.set(this.ONE, offset + this.audioCtx.sampleRate * i);
+            break;
+          case "!":
+            block.set(this.END, offset + this.audioCtx.sampleRate * i);
+        }
+      });
+    }
+    return block;
   }
 
   private sine(sampleNumber: number, frequency: number): number {
@@ -50,7 +51,7 @@ class DCF77Player {
 
     for (let i = 0; i < this.audioCtx.sampleRate; i++) {
       if (i / this.audioCtx.sampleRate < ampMod) {
-        second[i] = 0;
+        second[i] = this.sine(i, this.frequency) * 0.25;
       } else {
         second[i] = this.sine(i, this.frequency);
       }
@@ -58,48 +59,90 @@ class DCF77Player {
     return second;
   }
 
-  private playMinute(minute: Float32Array): void {
+  private async playBlock(
+    block: Float32Array,
+    playTimestamp: number = 0
+  ): Promise<void> {
     const buffer: AudioBuffer = this.audioCtx.createBuffer(
       1,
-      minute.length,
+      block.length,
       this.audioCtx.sampleRate
     );
-    buffer.copyToChannel(minute, 0);
 
-    const source: AudioBufferSourceNode  = this.audioCtx.createBufferSource();
+    buffer.copyToChannel(block, 0);
+
+    const source: AudioBufferSourceNode = this.audioCtx.createBufferSource();
     source.buffer = buffer;
-    source.connect(this.audioCtx.destination);
-    source.start(0);
+
+    // Filter (https://developer.mozilla.org/en-US/docs/Web/API/BiquadFilterNode)
+    const filter: BiquadFilterNode = this.audioCtx.createBiquadFilter();
+    filter.type = "lowshelf";
+    filter.frequency.value = 15_000;
+    filter.gain.value = -20;
+
+    // Gain (https://developer.mozilla.org/en-US/docs/Web/API/GainNode)
+    const gain: GainNode = this.audioCtx.createGain();
+    gain.gain.value = 1.0;
+
+    // Connect source -> filter -> gain -> destination
+    // If you want to bypass both filter and gain, just use source.connect(this.audioCtx.destination)
+    source.connect(filter);
+    filter.connect(gain);
+    gain.connect(this.audioCtx.destination);
+
+    // Here we time the playback to start at the correct second
+    const offset: number = (new Date().getTime() - playTimestamp) / 1000;
+    const offsetSeconds: number = Math.floor(offset);
+    const offsetRemainingMilliseconds: number = Math.abs(
+      offset - offsetSeconds
+    );
+
+    // Wait for the next second to start
+    await new Promise((resolve) =>
+      setTimeout(resolve, offsetRemainingMilliseconds * 1000)
+    );
+    await new Promise((resolve) =>
+      setTimeout(resolve, 1000 - new Date().getMilliseconds())
+    );
+
+    source.start(
+      0,
+      new Date().getSeconds() - new Date(playTimestamp).getSeconds()
+    );
+
+    // When the block is finished playing, play the next block, and create the block after that
     source.onended = () => {
-      this.currentMinute = this.nextMinute;
-      this.playMinute(this.currentMinute);
-      setTimeout(this.createNextMinute, 5000);
+      this.currentBlock = this.nextBlock;
+      this.playBlock(this.currentBlock);
+      setTimeout(this.createNextBlock, 5000);
     };
   }
 
-  private createNextMinute = (): void => {
-    this.nextMinute = this.createMinute(2);
+  private createNextBlock = (): void => {
+    this.nextBlock = this.createBlock(this.blockLengthMinutes + 1);
   };
 
   constructor() {
-    this.audioCtx = new AudioContext();
+    this.audioCtx = new AudioContext({ sampleRate: 44_100 });
     this.ZERO = this.createSecond(0.1);
     this.ONE = this.createSecond(0.2);
     this.END = this.createSecond(0.0);
   }
 
-  public async playSignal(): Promise<void> {
-    this.currentMinute = this.createMinute(1);
-    this.nextMinute = this.createMinute(2);
+  public playSignal(): void {
+    // Timestamp of user clicking the play button
+    const playTimestamp: number = new Date().getTime();
 
-    await new Promise((r) =>
-      setTimeout(r, 1000 - new Date().getMilliseconds())
-    );
+    // Two 10-minute signal blocks are created
+    this.currentBlock = this.createBlock(1);
+    this.nextBlock = this.createBlock(this.blockLengthMinutes + 1);
 
-    this.playMinute(
-      this.currentMinute.slice(
+    // The beginning of the first block is skipped based on the current second of the minute
+    this.playBlock(
+      this.currentBlock.slice(
         new Date().getSeconds() * this.audioCtx.sampleRate
-      )
+      ),
+      playTimestamp
     );
   }
 
