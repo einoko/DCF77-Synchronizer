@@ -44,7 +44,7 @@ export const DCF77Minute = (time: Date): string => {
   signal += evenParity(hourBits);
 
   // (:36-:41) Day of month (BCD)
-  const dayBits = BCD(time.getMonth() + 1, 6);
+  const dayBits = BCD(time.getDate(), 6);
   signal += dayBits;
 
   // (:42-:44) Day of week (BCD), 1-7 = Monday-Sunday
